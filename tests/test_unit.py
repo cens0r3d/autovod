@@ -143,6 +143,7 @@ class ProbeTest(unittest.TestCase):
         self.assertFalse(autovod.parse_probe_output("streamlink is confused").live)
         self.assertFalse(autovod.parse_probe_output("").live)
         self.assertFalse(autovod.parse_probe_output('{"streams": {}}').live)
+        self.assertIn("no output", autovod.parse_probe_output("").error)
 
     def test_leading_noise_is_tolerated(self):
         probe = autovod.parse_probe_output('warning: something\n{"streams": {"best": {}}, "metadata": {}}')
@@ -258,6 +259,27 @@ class ArgumentsTest(TempDirMixin, unittest.TestCase):
         app = self.make_app(extra='STREAMLINK_FLAGS=("--twitch-disable-ads" "--twitch-disable-reruns" "--foo")\n')
         flags = app.streamlink_flags()
         self.assertEqual(flags, ["--foo"])
+
+    def test_array_comment_parentheses_stay_out_of_the_array(self):
+        # the trailing comment in real configs mentions parentheses; the array
+        # must end at the first ')' and the comment must not leak into a flag
+        cfg = self.load_config(
+            'STREAMLINK_FLAGS=("" "--foo=bar baz") #? (NB! Array) (https://x.y)\n')
+        self.assertEqual(cfg.arrays["STREAMLINK_FLAGS"], ["", "--foo=bar baz"])
+
+    def test_empty_flags_are_dropped(self):
+        # an empty argv element makes streamlink 7.x exit 0 without any output
+        app = self.make_app(extra='STREAMLINK_FLAGS=("" "--foo")\n')
+        self.assertEqual(app.streamlink_flags(), ["--foo"])
+
+    def test_relative_binary_is_resolved_against_the_config_dir(self):
+        app = self.make_app(extra='STREAMLINK_BIN=(".venv/bin/streamlink")\n')
+        self.assertEqual(app.streamlink_cmd[0],
+                         os.path.join(app.cfg.dir, ".venv", "bin", "streamlink"))
+
+    def test_bare_binary_stays_a_path_lookup(self):
+        app = self.make_app()
+        self.assertEqual(app.streamlink_cmd, ["streamlink"])
 
     def test_restream_forces_h264_codec_preference(self):
         app = self.make_app(extra='UPLOAD_SERVICE="restream"\nRTMPS_STREAM_KEY="key"\n')

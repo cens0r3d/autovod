@@ -328,7 +328,9 @@ class Config:
                 return
             key = match.group(1)
         inner = text[text.index("(") + 1:]
-        inner = inner.rsplit(")", 1)[0]
+        # close at the FIRST ')': the rest of the line is a comment and may
+        # contain parentheses itself (e.g. "(#? ... (https://...)")
+        inner = inner.split(")", 1)[0]
         items = self._parse_words(inner)
         self.arrays[key] = items
         self.env[key] = " ".join(items)
@@ -744,6 +746,8 @@ class Probe:
 
 def parse_probe_output(text):
     """Turn ``streamlink --json`` output into a Probe (never raises)."""
+    if not str(text).strip():
+        return Probe(False, {}, {}, error="streamlink returned no output")
     payload = None
     try:
         payload = json.loads(text)
@@ -1222,10 +1226,10 @@ class AutoVod:
         self.active_child = None
         self._stop_event = threading.Event()
         #: binary overrides - useful for venv/pipx installs, wrappers and tests
-        self.streamlink_cmd = cfg.get_list("STREAMLINK_BIN", ["streamlink"])
-        self.ffmpeg_cmd = cfg.get_list("FFMPEG_BIN", ["ffmpeg"])
-        self.rclone_cmd = cfg.get_list("RCLONE_BIN", ["rclone"])
-        self.ytuploader_cmd = cfg.get_list("YOUTUBE_UPLOADER_BIN", ["youtubeuploader"])
+        self.streamlink_cmd = self._binary(cfg, "STREAMLINK_BIN", ["streamlink"])
+        self.ffmpeg_cmd = self._binary(cfg, "FFMPEG_BIN", ["ffmpeg"])
+        self.rclone_cmd = self._binary(cfg, "RCLONE_BIN", ["rclone"])
+        self.ytuploader_cmd = self._binary(cfg, "YOUTUBE_UPLOADER_BIN", ["youtubeuploader"])
         self.state_dir = cfg.path_in_config_dir(cfg.get("STATE_DIR", ".autovod")) or ".autovod"
         self.state = State(os.path.join(self.state_dir, "%s.state.json" % self.streamer))
         self.lock = FileLock(os.path.join(self.state_dir, "%s.lock" % self.streamer))
@@ -1259,6 +1263,13 @@ class AutoVod:
         raise ConfigError("invalid STREAM_SOURCE %r (valid: twitch, kick, youtube - or set STREAM_URL)"
                           % source)
 
+    def _binary(self, cfg, key, default):
+        """Binary/command override, relative paths resolved against the config dir."""
+        cmd = list(cfg.get_list(key, default))
+        if cmd and ("/" in cmd[0] or os.sep in cmd[0]) and not os.path.isabs(cmd[0]):
+            cmd[0] = cfg.path_in_config_dir(cmd[0])
+        return cmd
+
     def _part_duration(self):
         if self.cfg.get_bool("SPLIT_INTO_PARTS", False):
             return parse_duration(self.cfg.get("SPLIT_VIDEO_DURATION", "06:00:00"), 6 * 3600)
@@ -1267,6 +1278,10 @@ class AutoVod:
     def streamlink_flags(self):
         filtered = []
         for flag in self.cfg.get_list("STREAMLINK_FLAGS", []):
+            if not str(flag).strip():
+                # empty array slots ("") are a 2.x habit; passing an empty
+                # argv element makes streamlink 7.x exit 0 with no output
+                continue
             base = flag.split("=", 1)[0]
             if base in DEPRECATED_STREAMLINK_FLAGS:
                 self.log.warning("dropping %s: disabled by streamlink >= 7.5.0 (ad filtering is "

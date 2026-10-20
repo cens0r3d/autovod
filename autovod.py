@@ -1267,7 +1267,9 @@ class AutoVod:
         """Binary/command override, relative paths resolved against the config dir."""
         cmd = list(cfg.get_list(key, default))
         if cmd and ("/" in cmd[0] or os.sep in cmd[0]) and not os.path.isabs(cmd[0]):
-            cmd[0] = cfg.path_in_config_dir(cmd[0])
+            # normpath keeps the path in native separators (".venv/bin/x" -> ".venv\\bin\\x"
+            # on Windows) so argv/logs never carry mixed separators
+            cmd[0] = os.path.normpath(cfg.path_in_config_dir(cmd[0]))
         return cmd
 
     def _part_duration(self):

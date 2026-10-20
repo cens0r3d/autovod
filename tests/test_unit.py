@@ -150,6 +150,41 @@ class ProbeTest(unittest.TestCase):
         self.assertTrue(probe.live)
 
 
+class YoutubeTitleTest(TempDirMixin, unittest.TestCase):
+    def test_short_title_is_untouched(self):
+        self.assertEqual(autovod.clamp_youtube_title("streamer - title", "title"), "streamer - title")
+
+    def test_long_title_keeps_date_and_part_suffix(self):
+        stream = "Nächste Runde Carsten Stahl vs. ZDF"
+        raw = ("errungenschaftensammler - %s - Just Chatting | 20-10-26 22_39_55 Part: 3" % stream)
+        self.assertGreater(len(raw), 100)
+        out = autovod.clamp_youtube_title(raw, stream)
+        self.assertEqual(len(out), 100)
+        self.assertTrue(out.endswith("Part: 3"))
+        self.assertIn("20-10-26 22_39_55", out)
+        self.assertIn("…", out)
+
+    def test_angle_brackets_are_stripped(self):
+        self.assertEqual(autovod.clamp_youtube_title("a <b> c"), "a b c")
+
+    def test_hard_limit_without_a_known_stream_title(self):
+        self.assertEqual(len(autovod.clamp_youtube_title("x" * 150)), 100)
+
+    def test_youtube_metadata_clamps_a_rendered_part(self):
+        import datetime
+        app = self.make_app(extra='UPLOAD_SERVICE="youtube"\n'
+                                  'VIDEO_TITLE="$STREAMER_NAME - {{TITLE}} - {{GAME}} | TIME_DATE TIME_CLOCK"\n',
+                            name="errungenschaftensammler")
+        stream = "Nächste Runde: Carsten Stahl vs. ZDF und danach die grosse Diskussion"
+        part = autovod.Part(1, "", "", "", "", 0, datetime.datetime.now(),
+                            {"title": stream, "category": "Just Chatting"})
+        part.title = app.render(app.cfg.get("VIDEO_TITLE"), part=part, metadata=part.metadata)
+        self.assertGreater(len(part.title), 100)
+        meta = app.youtube_metadata(part)
+        self.assertLessEqual(len(meta["title"]), 100)
+        self.assertIn("20", meta["title"])
+
+
 class RenderTest(TempDirMixin, unittest.TestCase):
     def test_legacy_placeholders(self):
         app = self.make_app()

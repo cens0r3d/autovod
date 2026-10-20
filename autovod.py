@@ -231,6 +231,33 @@ def which(program):
     return shutil.which(program)
 
 
+#: YouTube rejects longer titles (and any '<' / '>') with
+#: "invalid or empty video title", which aborts the whole part.
+YOUTUBE_TITLE_MAX = 100
+YOUTUBE_DESCRIPTION_MAX = 5000
+_TITLE_EDGE_CHARS = " -–—|:,_"
+
+
+def clamp_youtube_title(text, stream_title="", limit=YOUTUBE_TITLE_MAX):
+    """Fit a rendered title into YouTube's limit without losing the suffix.
+
+    The stream-title portion is shortened first, so the date and the part
+    suffix (the part that actually distinguishes two VODs) survive.
+    """
+    value = re.sub(r"\s+", " ", str(text or "")).replace("<", "").replace(">", "").strip()
+    if len(value) <= limit:
+        return value
+    stream_title = re.sub(r"\s+", " ", str(stream_title or "")).strip()
+    if stream_title and stream_title in value:
+        room = limit - (len(value) - len(stream_title))
+        if room >= 12:
+            shortened = stream_title[:room - 1].rstrip(_TITLE_EDGE_CHARS) + "…"
+            value = value.replace(stream_title, shortened)
+    if len(value) > limit:
+        value = value[:limit].rstrip(_TITLE_EDGE_CHARS)
+    return value
+
+
 # ----------------------------------------------------------------------------
 # config parser (bash subset - the existing *.config files keep working)
 # ----------------------------------------------------------------------------
@@ -1364,11 +1391,16 @@ class AutoVod:
         contain the stream metadata), so nothing is re-rendered here.
         """
         if part is not None:
-            title = part.title
+            raw_title = part.title
+            title = clamp_youtube_title(raw_title, part.metadata.get("title", ""))
+            if title != raw_title:
+                self.log.info("title shortened for YouTube (%d > %d chars): %s"
+                              % (len(raw_title), YOUTUBE_TITLE_MAX, title))
             description = part.description
             playlist = str(part.playlist or "").strip()
         else:
-            title = self.render(str(self.cfg.get("VIDEO_TITLE", "$STREAMER_NAME - TIME_DATE")))
+            title = clamp_youtube_title(
+                self.render(str(self.cfg.get("VIDEO_TITLE", "$STREAMER_NAME - TIME_DATE"))))
             description = self.render(str(self.cfg.get("VIDEO_DESCRIPTION", "")))
             playlist = self.render(str(self.cfg.get("VIDEO_PLAYLIST", ""))).strip()
         meta = {
@@ -1376,7 +1408,12 @@ class AutoVod:
             "privacyStatus": str(self.cfg.get("VIDEO_VISIBILITY", "unlisted") or "unlisted"),
         }
         if description:
-            meta["description"] = description.replace("\\n", "\n")
+            text = description.replace("\\n", "\n")
+            if len(text) > YOUTUBE_DESCRIPTION_MAX:
+                self.log.warning("description shortened for YouTube (%d > %d chars)"
+                                 % (len(text), YOUTUBE_DESCRIPTION_MAX))
+                text = text[:YOUTUBE_DESCRIPTION_MAX]
+            meta["description"] = text
         if playlist:
             meta["playlistTitles"] = [playlist]
         tags = [tag.strip() for tag in str(self.cfg.get("VIDEO_TAGS", "")).split(",") if tag.strip()]

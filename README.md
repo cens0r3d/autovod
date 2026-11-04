@@ -2,10 +2,10 @@
 
 [![tests](https://github.com/cens0r3d/autovod/actions/workflows/ci.yml/badge.svg)](https://github.com/cens0r3d/autovod/actions/workflows/ci.yml)
 
-Record [Twitch.tv](https://twitch.tv), [Kick.com](https://kick.com) or
-[YouTube Live](https://youtube.com/live) streams in realtime and upload them to
-YouTube, an [rclone](https://rclone.org) remote, an RTMP(S) endpoint or your
-local disk.
+Record [Twitch.tv](https://twitch.tv), [Kick.com](https://kick.com),
+[YouTube Live](https://youtube.com/live) or [TikTok LIVE](https://www.tiktok.com/live)
+streams in realtime and upload them to YouTube, an [rclone](https://rclone.org)
+remote, an RTMP(S) endpoint or your local disk.
 
 > **This is the 3.x rewrite of [jenslys/AutoVOD](https://github.com/jenslys/AutoVOD).**
 > The 2.x shell implementation had several crash-on-first-use bugs (broken part
@@ -85,7 +85,7 @@ a config can neither run code nor break your shell.
 Minimum to change for Twitch → YouTube:
 
 ```sh
-STREAM_SOURCE="twitch"          # twitch | kick | youtube, or set STREAM_URL
+STREAM_SOURCE="twitch"          # twitch | kick | youtube | tiktok, or set STREAM_URL
 STREAMER_CHANNEL=""             # only if the channel differs from the config name
 UPLOAD_SERVICE="youtube"
 VIDEO_VISIBILITY="unlisted"     # unlisted | private | public
@@ -141,14 +141,49 @@ STREAMLINK_FLAGS=("--twitch-supported-codecs=h264,h265,av1")
 are **no-ops on streamlink ≥ 7.5.0** (ads are always filtered now); AutoVOD drops
 them with a log line if an old config still contains them.
 
+### 5. TikTok LIVE specifics
+
+```sh
+STREAM_SOURCE="tiktok"
+STREAMER_CHANNEL="schattendernacht"        # https://www.tiktok.com/@schattendernacht/live
+HTTP_COOKIES_FILE="tiktok-cookies.txt"     # required - see below
+STREAMLINK_QUALITY="best"                  # remapped to the best H.264 rendition
+```
+
+Three TikTok facts shape this mode:
+
+1. **Cookies are mandatory.** Without a logged-in session TikTok's
+   `api-live/user/room` answers with a redacted room (`status 2`, empty `title`,
+   no `streamData`), so streamlink reports "no playable streams" while the
+   stream is visibly live. Export a Netscape `cookies.txt` from a browser
+   logged into an account the host has not blocked and point
+   `HTTP_COOKIES_FILE` at it.
+   **The expiry field must be a real timestamp.** A cookies file exported with
+   `0` (or an already expired one) is silently dropped by Python's cookie jar -
+   the request then goes out without cookies and TikTok redacts the room again.
+   `4102444800` (2100-01-01) is a safe value.
+2. **Only FLV.** TikTok's HLS URLs answer 403, so `streamlink` yields plain FLV
+   HTTP streams. `--hls-duration` is an HLS-only option and therefore useless
+   here: the part length is enforced by ffmpeg (`-t`), which also remuxes the
+   FLV into the container of your filename (`-c copy`, no transcoding).
+   A dropped connection ends the part and the next check starts a new one.
+3. **`best` is HEVC and unusable.** streamlink weights `h265_*` above `h264_*`,
+   and ffmpeg's FLV demuxer cannot read TikTok's HEVC-in-FLV (codec id 12:
+   `dimensions not set` / `Could not write header`). FLV mode therefore selects
+   the highest H.264 rendition (`h264_origin,h264_uhd_60,…,h264_hd,…,best`).
+   Use `STREAM_FLV="false"` only if you pipe the stream somewhere that can read
+   HEVC-in-FLV yourself.
+
+Height: TikTok is vertical (e.g. 720x1440) - YouTube will pillarbox it.
+
 ## Configuration reference
 
 | Group | Settings |
 |---|---|
-| Source | `STREAM_SOURCE`, `STREAMER_CHANNEL`, `STREAM_URL` |
+| Source | `STREAM_SOURCE`, `STREAMER_CHANNEL`, `STREAM_URL`, `STREAM_FLV` (`auto`/`true`/`false`), `HTTP_COOKIES_FILE` |
 | Sink | `UPLOAD_SERVICE` |
 | Streamlink | `STREAMLINK_QUALITY`, `QUALITY_FALLBACK`, `STREAMLINK_FLAGS`, `STREAMLINK_EXTRA_ARGS`, `STREAMLINK_LOGS`, `STREAMLINK_RETRY_STREAMS`, `STREAMLINK_RETRY_MAX`, `STREAMLINK_RETRY_OPEN`, `STREAMLINK_STREAM_TIMEOUT`, `STREAMLINK_HLS_LIVE_EDGE`, `STREAMLINK_BIN` |
-| Recording | `VIDEO_DURATION`, `SPLIT_INTO_PARTS`, `SPLIT_VIDEO_DURATION`, `RECONNECT_MAX`, `RECONNECT_DELAY`, `SAVE_ON_FAIL`, `TEMP_DIR` |
+| Recording | `VIDEO_DURATION`, `SPLIT_INTO_PARTS`, `SPLIT_VIDEO_DURATION`, `RECONNECT_MAX`, `RECONNECT_DELAY`, `SAVE_ON_FAIL`, `TEMP_DIR`, `RECORD_FFMPEG_LOG` |
 | Runtime | `POLL_INTERVAL`, `POLL_INTERVAL_MAX`, `POLL_BACKOFF`, `LOCK`, `STATE_DIR`, `LOG_LEVEL`, `LOG_FILE`, `LOG_MAX_MB`, `LOG_BACKUPS`, `DISCORD_WEBHOOK`, `NOTIFY_ON` |
 | Naming | `VIDEO_TITLE`, `VIDEO_DESCRIPTION`, `VIDEO_PLAYLIST`, `RCLONE_FILENAME`, `LOCAL_FILENAME`, `YOUTUBE_FILENAME`, `DATE_FORMAT`, `CLOCK_FORMAT` |
 | YouTube | `VIDEO_VISIBILITY`, `VIDEO_TAGS`, `VIDEO_CATEGORY_ID`, `VIDEO_LANGUAGE`, `VIDEO_MADE_FOR_KIDS`, `VIDEO_META_EXTRA_JSON`, `YOUTUBE_RECORD_TO_DISK`, `YOUTUBE_KEEP_LOCAL`, `YOUTUBE_MIN_BYTES`, `YOUTUBE_RATELIMIT`, `YOUTUBE_NOTIFY_SUBSCRIBERS`, `YOUTUBE_SECRETS`, `YOUTUBE_TOKEN_CACHE`, `YOUTUBE_UPLOADER_BIN`, `UPLOAD_RETRY_MAX` |

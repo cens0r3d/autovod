@@ -4,6 +4,8 @@ request.token
 sample.mp4
 *.config
 !default.config
+*tiktok-cookies.txt
+cookies.txt
 .vscode/*
 .nova/*
 /recordings/

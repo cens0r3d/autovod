@@ -182,7 +182,7 @@ class YoutubeTitleTest(TempDirMixin, unittest.TestCase):
         self.assertGreater(len(part.title), 100)
         meta = app.youtube_metadata(part)
         self.assertLessEqual(len(meta["title"]), 100)
-        self.assertIn("20", meta["title"])
+        self.assertIn(part.now.strftime("%d-%m-%y"), meta["title"])
 
 
 class RenderTest(TempDirMixin, unittest.TestCase):
@@ -411,6 +411,71 @@ class CliTest(TempDirMixin, unittest.TestCase):
 
     def test_missing_config_file(self):
         self.assertEqual(autovod.main(["-n", "ghost"]), 2)
+
+
+class TikTokFlvTest(TempDirMixin, unittest.TestCase):
+    """FLV sources (TikTok LIVE): no --hls-duration, ffmpeg cuts and remuxes."""
+
+    def tiktok_app(self, **kwargs):
+        return self.make_app(extra='STREAM_SOURCE="tiktok"\n'
+                                   'STREAMER_CHANNEL="schattendernacht"\n', **kwargs)
+
+    def test_url_is_https_and_points_at_the_live_page(self):
+        app = self.tiktok_app()
+        self.assertEqual(app.stream_url, "https://www.tiktok.com/@schattendernacht/live")
+        self.assertTrue(app.flv_mode)
+
+    def test_at_prefix_in_the_channel_name_is_dropped(self):
+        app = self.make_app(extra='STREAM_SOURCE="tiktok"\nSTREAMER_CHANNEL="@someone"\n')
+        self.assertEqual(app.stream_url, "https://www.tiktok.com/@someone/live")
+
+    def test_flv_mode_is_off_for_other_sources_and_can_be_forced(self):
+        self.assertFalse(self.make_app().flv_mode)
+        self.assertTrue(self.make_app(extra='STREAM_FLV="true"\n').flv_mode)
+        app = self.make_app(extra='STREAM_SOURCE="tiktok"\nSTREAM_FLV="false"\n')
+        self.assertFalse(app.flv_mode)
+
+    def test_best_never_picks_hevc(self):
+        selection = self.tiktok_app()._stream_selection("best")
+        self.assertTrue(selection.startswith("h264_origin,"))
+        self.assertTrue(selection.endswith(",best"))
+        self.assertNotIn("h265", selection)
+
+    def test_explicit_stream_name_is_kept(self):
+        self.assertEqual(self.tiktok_app()._stream_selection("h264_hd"), "h264_hd")
+        self.assertEqual(self.tiktok_app()._stream_selection("worst"), "h264_ao")
+
+    def test_record_argv_has_no_hls_duration(self):
+        argv = self.tiktok_app().streamlink_argv(duration=3600)
+        self.assertIn("--stdout", argv)
+        self.assertNotIn("--hls-duration", argv)
+
+    def test_remux_argv_copies_and_cuts_at_the_part_length(self):
+        argv = self.tiktok_app().remux_argv("/x/part.mkv.part", 40, container="matroska")
+        self.assertEqual(argv[argv.index("-i") + 1], "pipe:0")
+        self.assertEqual(argv[argv.index("-t") + 1], "40")
+        self.assertEqual(argv[argv.index("-c") + 1], "copy")
+        self.assertEqual(argv[argv.index("-f") + 1], "matroska")
+        self.assertEqual(argv[-1], "/x/part.mkv.part")
+
+    def test_remux_container_comes_from_the_extension_then_the_hint(self):
+        app = self.tiktok_app()
+        self.assertEqual(app.remux_container("/x/a.mp4"), "mp4")
+        self.assertEqual(app.remux_container("/x/a.flv"), "flv")
+        self.assertEqual(app.remux_container("/x/a.part", "matroska"), "matroska")
+        self.assertEqual(app.remux_container("/x/a.raw"), "matroska")
+
+    def test_cookie_file_is_passed_to_streamlink(self):
+        cookies = os.path.join(self.dir, "cookies.txt")
+        with open(cookies, "w", encoding="utf-8") as handle:
+            handle.write("# Netscape HTTP Cookie File\n")
+        app = self.make_app(extra='HTTP_COOKIES_FILE="cookies.txt"\n')
+        self.assertIn("--http-cookies-file=%s" % cookies, app.streamlink_flags())
+
+    def test_missing_cookie_file_only_warns(self):
+        app = self.make_app(extra='HTTP_COOKIES_FILE="nope.txt"\n')
+        flags = app.streamlink_flags()
+        self.assertFalse(any("--http-cookies-file" in flag for flag in flags))
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-AutoVOD 3.x - realtime recorder + uploader for Twitch / Kick / YouTube Live.
+AutoVOD 3.x - realtime recorder + uploader for Twitch / Kick / YouTube / TikTok Live.
 
 Records a live stream with streamlink and hands it to one of four sinks:
 
@@ -47,7 +47,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime
 
-VERSION = "3.1.0"
+VERSION = "3.2.0"
 PROG = "autovod"
 # Discord sits behind Cloudflare, which answers the stdlib's default
 # "Python-urllib/x.y" user agent with 403 / error 1010 - every webhook
@@ -820,8 +820,7 @@ class Notifier:
         content = "**[%s] %s**\n%s" % (self.streamer, event, message)
         payload = json.dumps({"username": "AutoVOD", "content": content[:1900]}).encode("utf-8")
         request = urllib.request.Request(
-            self.url, data=payload,
-            headers={"Content-Type": "application/json", "User-Agent": USER_AGENT},
+            self.url, data=payload, headers={"Content-Type": "application/json", "User-Agent": USER_AGENT}
         )
         try:
             with urllib.request.urlopen(request, timeout=15) as response:
@@ -908,10 +907,12 @@ class LocalSink(Sink):
         target = self.app.unique_path(target)
         partial = target + ".part"
         if self.app.dry_run:
-            self.app.record_to_path(partial, part, label="streamlink")
+            self.app.record_to_path(partial, part, label="streamlink",
+                                    container=CONTAINER_BY_EXT.get(extension))
             return self.finish_dry_run(part, "record %s" % target)
         self.log.info("recording to %s" % target)
-        code, seconds = self.app.record_to_path(partial, part, label="streamlink")
+        code, seconds = self.app.record_to_path(partial, part, label="streamlink",
+                                                container=CONTAINER_BY_EXT.get(extension))
         if code != 0 and not self.app.stop_requested:
             self.log.error("streamlink exited with code %s" % code)
         if not os.path.exists(partial) or os.path.getsize(partial) == 0:
@@ -961,14 +962,16 @@ class RcloneSink(Sink):
         if reencode:
             final = os.path.join(workdir, "%s.%s" % (base, extension))
         if self.app.dry_run:
-            self.app.record_to_path(raw, part, label="streamlink")
+            self.app.record_to_path(raw, part, label="streamlink",
+                                    container=CONTAINER_BY_EXT.get(extension))
             if reencode:
                 self.app.reencode(raw, final)
             self.log.info("[dry-run] rclone copyto %s %s:/%s" % (final, self.cfg.get("RCLONE_REMOTE"), base))
             return self.finish_dry_run(part, "record + upload")
 
         self.log.info("recording to %s" % raw)
-        code, seconds = self.app.record_to_path(raw, part, label="streamlink")
+        code, seconds = self.app.record_to_path(raw, part, label="streamlink",
+                                                container=CONTAINER_BY_EXT.get(extension))
         if code != 0 and not self.app.stop_requested:
             self.log.error("streamlink exited with code %s" % code)
         if not os.path.exists(raw) or os.path.getsize(raw) == 0:
@@ -1055,11 +1058,15 @@ class RestreamSink(Sink):
                  "-ac", str(audio["channels"])]
         if self.cfg.get_bool("RESTREAM_FORCE_KEYFRAMES", True) and codec != "copy":
             argv += ["-g", str(self.cfg.get_int("RESTREAM_GOP", 60))]
+        # FLV sources cannot be cut by streamlink (--hls-duration is HLS-only)
+        duration = None if self.app.flv_mode else part.duration
+        if self.app.flv_mode and part.duration:
+            argv += ["-t", str(int(part.duration))]
         argv += ["-f", container, target]
 
         if self.app.dry_run:
             self.log.info("[dry-run] %s > 0 | %s"
-                          % (" ".join(self.app.streamlink_argv(duration=part.duration)), " ".join(argv)))
+                          % (" ".join(self.app.streamlink_argv(duration=duration)), " ".join(argv)))
             return self.finish_dry_run(part, "restream to %s" % url)
 
         attempts = max(1, self.cfg.get_int("RECONNECT_MAX", 5))
@@ -1068,7 +1075,7 @@ class RestreamSink(Sink):
             if self.app.stop_requested:
                 break
             self.log.info("restreaming to %s (attempt %d/%d)" % (url, attempt, attempts))
-            sl = ChildProcess(self.app.streamlink_argv(duration=part.duration), self.log,
+            sl = ChildProcess(self.app.streamlink_argv(duration=duration), self.log,
                               name="streamlink", stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                               pump_stdout=False)
             ff = ChildProcess(argv, self.log, name="ffmpeg", stdin=sl.proc.stdout)
@@ -1106,6 +1113,12 @@ class YoutubeSink(Sink):
         workdir = self.app.work_dir()
         cache_path = os.path.join(workdir, "%s.upload.mkv" % base)
         record_to_disk = self.cfg.get_bool("YOUTUBE_RECORD_TO_DISK", True)
+        if self.app.flv_mode and not record_to_disk:
+            # an FLV pipe cannot be repaired by YouTube's transcoder, and a
+            # dead pipe loses the part - always buffer FLV parts on disk
+            self.log.warning("YOUTUBE_RECORD_TO_DISK=false ignored for FLV sources "
+                             "(a failed pipe would lose the whole part)")
+            record_to_disk = True
         started = time.time()
 
         if self.app.dry_run:
@@ -1275,6 +1288,7 @@ class AutoVod:
                               % (self.sink_name, ", ".join(sorted(SINKS))))
         self.sink = sink_class(self)
         self.stream_url = self._build_stream_url()
+        self.flv_mode = self._detect_flv_mode()
         self.duration = self._part_duration()
         self.quality = str(cfg.get("STREAMLINK_QUALITY", "best")).strip() or "best"
         self.session_count = 0
@@ -1292,8 +1306,27 @@ class AutoVod:
             return "kick.com/%s" % name
         if source == "youtube":
             return "youtube.com/@%s/live" % name
-        raise ConfigError("invalid STREAM_SOURCE %r (valid: twitch, kick, youtube - or set STREAM_URL)"
-                          % source)
+        if source == "tiktok":
+            # the plugin matcher needs a scheme: its pattern is
+            # ^https?://(?:www\.)?tiktok\.com/@<channel>(?:$|/live)
+            return "https://www.tiktok.com/@%s/live" % name.lstrip("@")
+        raise ConfigError("invalid STREAM_SOURCE %r (valid: twitch, kick, youtube, tiktok - "
+                          "or set STREAM_URL)" % source)
+
+    def _detect_flv_mode(self):
+        """True when the source only offers FLV and needs the ffmpeg remux path.
+
+        streamlink's tiktok plugin yields plain FLV HTTP streams (its HLS
+        variant answers 403), and ``--hls-duration`` is an HLS-only option, so
+        parts have to be cut by ffmpeg instead of streamlink.  ``STREAM_FLV``
+        overrides the autodetection: auto | true | false.
+        """
+        raw = str(self.cfg.get("STREAM_FLV", "auto") or "auto").strip().lower()
+        if raw in ("true", "1", "yes", "on"):
+            return True
+        if raw in ("false", "0", "no", "off"):
+            return False
+        return "tiktok.com" in self.stream_url.lower()
 
     def _binary(self, cfg, key, default):
         """Binary/command override, relative paths resolved against the config dir."""
@@ -1323,6 +1356,16 @@ class AutoVod:
                 continue
             filtered.append(flag)
         filtered.extend(self.cfg.get_list("STREAMLINK_EXTRA_ARGS", []))
+        cookies = str(self.cfg.get("HTTP_COOKIES_FILE", "") or "").strip()
+        if cookies:
+            path = self.cfg.path_in_config_dir(cookies)
+            if path and os.path.isfile(path):
+                # netscape cookies.txt; TikTok only hands out stream URLs to a
+                # viewer the host did not block (private / "secret" accounts)
+                filtered.append("--http-cookies-file=%s" % path)
+            else:
+                self.log.warning("HTTP_COOKIES_FILE not found: %s (continuing without cookies)"
+                                 % (path or cookies))
         if self.sink_name == "restream" and not any("--twitch-supported-codecs" in flag for flag in filtered):
             filtered.append("--twitch-supported-codecs=h264")
         return filtered
@@ -1346,14 +1389,30 @@ class AutoVod:
         ``-O`` and would otherwise spawn a video player on a server.
         """
         argv = self.streamlink_common() + ["--stdout"]
-        if duration:
+        if duration and not self.flv_mode:
             argv += ["--hls-duration", format_duration(duration)]
         argv.append(self.stream_url)
         argv.append(self._stream_selection(quality))
         return argv
 
+    #: ffmpeg's FLV demuxer cannot parse TikTok's HEVC-in-FLV (codec id 12), so
+    #: an FLV part has to be recorded from an H.264 rendition.  streamlink's
+    #: "best" weights h265 above h264, which is why FLV mode picks its own chain
+    #: (highest H.264 first, plain "best" only as the very last resort).
+    FLV_H264_CHAIN = ("h264_origin", "h264_uhd_60", "h264_uhd", "h264_hd_60", "h264_hd",
+                      "h264_sd", "h264_ld", "h264_ao")
+
+    def _flv_selection(self, quality):
+        if str(quality).startswith("h264_"):
+            return quality
+        if quality == "worst":
+            return "h264_ao"
+        return ",".join(self.FLV_H264_CHAIN + ("best",))
+
     def _stream_selection(self, quality=None):
         quality = quality or self.quality
+        if self.flv_mode:
+            return self._flv_selection(quality)
         fallback = str(self.cfg.get("QUALITY_FALLBACK", "best")).strip()
         if fallback and fallback != quality and quality not in ("best", "worst"):
             return "%s,%s" % (quality, fallback)
@@ -1508,8 +1567,10 @@ class AutoVod:
         return ChildProcess(argv, self.log, name=name).wait()
 
     # -- recording ----------------------------------------------------------
-    def record_to_path(self, path, part, label="streamlink"):
+    def record_to_path(self, path, part, label="streamlink", container=None):
         """Run streamlink writing to ``path``, reconnecting while still live."""
+        if self.flv_mode:
+            return self.record_flv_to_path(path, part, container=container)
         attempts = max(1, self.cfg.get_int("RECONNECT_MAX", 5))
         delay = self.cfg.get_int("RECONNECT_DELAY", 10)
         started = time.time()
@@ -1552,6 +1613,66 @@ class AutoVod:
             self.log.info("stream still live - reconnecting in %ss" % wait)
             self._stop_event.wait(wait)
         return last_code, time.time() - started
+
+    def remux_container(self, path, hint=None):
+        """ffmpeg muxer for a file: from its extension, else ``hint``, else matroska."""
+        extension = os.path.splitext(str(path))[1].lstrip(".").lower()
+        if extension in CONTAINER_BY_EXT:
+            return CONTAINER_BY_EXT[extension]
+        return hint or "matroska"
+
+    def remux_argv(self, path, duration=None, container=None):
+        """ffmpeg: FLV from stdin -> ``path``, cut at ``duration`` seconds.
+
+        ``-c copy`` keeps the recorded bitstream untouched (no transcoding,
+        no CPU load); ``-t`` is what makes parts work at all for FLV sources.
+        """
+        argv = self.ffmpeg_cmd + ["-hide_banner",
+                                  "-loglevel", str(self.cfg.get("RECORD_FFMPEG_LOG", "error")),
+                                  "-nostdin", "-i", "pipe:0"]
+        if duration:
+            argv += ["-t", str(int(duration))]
+        argv += ["-c", "copy", "-f", self.remux_container(path, container), "-y", path]
+        return argv
+
+    def record_flv_to_path(self, path, part, container=None):
+        """Record one FLV part (TikTok LIVE) through ffmpeg.
+
+        streamlink's tiktok plugin only exposes FLV HTTP streams (HLS answers
+        403) and ``--hls-duration`` is HLS-only, so ffmpeg enforces the part
+        length and writes the final container in the same pass.  A dropped
+        connection ends the part instead of appending to it: the main loop
+        probes again and starts the next part, so nothing is ever lost.
+        """
+        started = time.time()
+        sl_argv = self.streamlink_argv(duration=None)
+        ff_argv = self.remux_argv(path, part.duration, container=container)
+        if self.dry_run:
+            self.log.info("[dry-run] %s > 0 | %s" % (" ".join(sl_argv), " ".join(ff_argv)))
+            return 0, 0.0
+        directory = os.path.dirname(os.path.abspath(path))
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        self.log.debug("exec: %s" % " ".join(sl_argv))
+        self.log.debug("exec: %s" % " ".join(ff_argv))
+        sl = ChildProcess(sl_argv, self.log, name="streamlink", stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, pump_stdout=False)
+        ff = ChildProcess(ff_argv, self.log, name="ffmpeg", stdin=sl.proc.stdout,
+                          stderr=subprocess.PIPE)
+        sl.proc.stdout.close()
+        self.active_child = sl
+        try:
+            code = ff.wait()
+        finally:
+            self.active_child = None
+        sl.terminate(grace=5)
+        seconds = time.time() - started
+        if code == 0:
+            return 0, seconds
+        self.log.error("ffmpeg exited with code %s" % code)
+        if not self.stop_requested:
+            self.log.info("FLV source: the connection ended - the next check starts a new part")
+        return code, seconds
 
     def reencode(self, source, target):
         codec = str(self.cfg.get("RE_ENCODE_CODEC", "libx265"))
@@ -1635,6 +1756,11 @@ class AutoVod:
         self.log.info("preflight ok (stream selection=%s, part length=%s, split=%s)"
                       % (self._stream_selection(), format_duration(self.duration),
                          self.cfg.get_bool("SPLIT_INTO_PARTS", False)))
+        if self.flv_mode:
+            self.log.info("FLV source: ffmpeg cuts the part at %s and remuxes it "
+                          "(--hls-duration does not exist for FLV); a dropped connection "
+                          "ends the part and the next check starts a new one"
+                          % format_duration(self.duration))
         if self.probe_only:
             return self.report_probe()
         use_lock = self.cfg.get_bool("LOCK", True) and not self.dry_run

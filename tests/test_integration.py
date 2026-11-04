@@ -322,6 +322,36 @@ class IntegrationTest(unittest.TestCase):
         proc = self.run_cli(args=("--check",))
         self.assertIn("NOT_DEFINED", proc.stdout)
 
+    # -- tiktok / FLV sources ----------------------------------------------
+    def test_tiktok_records_through_the_flv_remux(self):
+        self.write_config("local", extra='STREAM_SOURCE="tiktok"\n'
+                                        'STREAMER_CHANNEL="schattendernacht"\n')
+        proc = self.run_cli()
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(self.out_files(), ["rec_tester.mkv"])
+        self.assertEqual(os.path.getsize(os.path.join(self.out, "rec_tester.mkv")), 4096)
+        calls = self.argv_calls()
+        streamlink_call = [call for call in calls if "--stdout" in call][0]
+        self.assertIn("https://www.tiktok.com/@schattendernacht/live", streamlink_call)
+        self.assertTrue(streamlink_call[-1].startswith("h264_origin,"))
+        self.assertNotIn("--hls-duration", streamlink_call)
+        ffmpeg_call = [call for call in calls if "pipe:0" in call][0]
+        self.assertEqual(ffmpeg_call[ffmpeg_call.index("-c") + 1], "copy")
+        self.assertEqual(ffmpeg_call[ffmpeg_call.index("-f") + 1], "matroska")
+        self.assertEqual(ffmpeg_call[ffmpeg_call.index("-t") + 1], "5")
+        self.assertIn("FLV source", proc.stdout)
+
+    def test_tiktok_forces_youtube_to_buffer_on_disk(self):
+        self.write_config("youtube", extra='STREAM_SOURCE="tiktok"\n'
+                                           'YOUTUBE_RECORD_TO_DISK="false"\n')
+        proc = self.run_cli()
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        uploads = self.uploads()
+        self.assertEqual(len(uploads), 1)
+        self.assertNotEqual(uploads[0]["filename"], "-")
+        self.assertEqual(uploads[0]["bytes"], 4096)
+        self.assertIn("ignored for FLV sources", proc.stdout)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

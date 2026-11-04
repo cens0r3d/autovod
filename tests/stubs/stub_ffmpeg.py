@@ -33,6 +33,13 @@ def main():
                 handle.write(json.dumps({"target": target, "bytes": len(data), "args": args}) + "\n")
         return int(os.environ.get("STUB_FFMPEG_EXIT", "0"))
 
+    if source == "pipe:0" and target:
+        # FLV remux path: streamlink -> stdin -> container on disk
+        data = sys.stdin.buffer.read()
+        with open(target, "wb") as handle:
+            handle.write(data)
+        return int(os.environ.get("STUB_FFMPEG_EXIT", "0"))
+
     if source and source != "pipe:0" and target:
         try:
             with open(source, "rb") as handle:

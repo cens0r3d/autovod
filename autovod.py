@@ -49,6 +49,10 @@ from datetime import datetime
 
 VERSION = "3.1.0"
 PROG = "autovod"
+# Discord sits behind Cloudflare, which answers the stdlib's default
+# "Python-urllib/x.y" user agent with 403 / error 1010 - every webhook
+# notification silently failed until this header was set.
+USER_AGENT = "AutoVOD/%s (+https://github.com/cens0r3d/autovod)" % VERSION
 
 # ----------------------------------------------------------------------------
 # logging
@@ -816,7 +820,8 @@ class Notifier:
         content = "**[%s] %s**\n%s" % (self.streamer, event, message)
         payload = json.dumps({"username": "AutoVOD", "content": content[:1900]}).encode("utf-8")
         request = urllib.request.Request(
-            self.url, data=payload, headers={"Content-Type": "application/json"}
+            self.url, data=payload,
+            headers={"Content-Type": "application/json", "User-Agent": USER_AGENT},
         )
         try:
             with urllib.request.urlopen(request, timeout=15) as response:

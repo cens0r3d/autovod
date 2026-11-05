@@ -1153,7 +1153,6 @@ class YoutubeSink(Sink):
                 video_url = self._uploaded_video_url(base)
                 if video_url:
                     self.log.info("uploaded: %s" % video_url)
-                    self.app.notifier.send("end", "uploaded: %s" % video_url)
                 else:
                     self.log.info("upload finished")
                 if self.cfg.get_bool("YOUTUBE_KEEP_LOCAL", False):
@@ -1197,10 +1196,10 @@ class YoutubeSink(Sink):
             return PartResult(False, "upload failed", seconds=time.time() - started)
         video_url = self._uploaded_video_url(base)
         self.log.info("upload finished" + (" - %s" % video_url if video_url else ""))
-        if video_url:
-            self.app.notifier.send("end", "uploaded: %s" % video_url)
-        return PartResult(True, "uploaded to youtube", uploaded=True,
-                          artifact=video_url or base, seconds=time.time() - started)
+        # no notification of its own here: the main loop reports
+        # "part N done: ..." exactly once per part, with the link when known
+        return PartResult(True, "uploaded to youtube" + (" (%s)" % video_url if video_url else ""),
+                          uploaded=True, artifact=video_url or base, seconds=time.time() - started)
 
     def _common_args(self):
         args = []

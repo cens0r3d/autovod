@@ -840,8 +840,10 @@ class Notifier:
 class Part:
     """Everything a sink needs to record/upload one chunk of the stream."""
 
-    def __init__(self, index, title, description, playlist, base, duration, now, metadata=None):
+    def __init__(self, index, title, description, playlist, base, duration, now, metadata=None,
+                 labels=True):
         self.index = index
+        self.labels = labels
         self.title = title
         self.description = description
         self.playlist = playlist
@@ -853,7 +855,8 @@ class Part:
 
     @property
     def suffix(self):
-        return "-Part_%d" % self.index if self.index > 1 else ""
+        """``-Part_2`` and up - dropped entirely when PART_LABELS is false."""
+        return "-Part_%d" % self.index if (self.index > 1 and self.labels) else ""
 
 
 class PartResult:
@@ -1738,11 +1741,14 @@ class AutoVod:
         raw_title = str(self.cfg.get("VIDEO_TITLE", "$STREAMER_NAME - TIME_DATE"))
         raw_description = str(self.cfg.get("VIDEO_DESCRIPTION", ""))
         raw_playlist = str(self.cfg.get("VIDEO_PLAYLIST", ""))
-        part = Part(index, raw_title, raw_description, raw_playlist, base, self.duration, now, metadata)
+        labels = self.cfg.get_bool("PART_LABELS", True)
+        part = Part(index, raw_title, raw_description, raw_playlist, base, self.duration, now,
+                    metadata, labels=labels)
         part.title = self.render(raw_title, part=part)
         part.description = self.render(raw_description, part=part)
         part.playlist = self.render(raw_playlist, part=part)
-        if (self.cfg.get_bool("SPLIT_INTO_PARTS", False) or index > 1) and "{{PART}}" not in raw_title:
+        if (labels and (self.cfg.get_bool("SPLIT_INTO_PARTS", False) or index > 1)
+                and "{{PART}}" not in raw_title):
             part.title = "%s Part: %d" % (part.title, index)
         self.state.save()
         return part

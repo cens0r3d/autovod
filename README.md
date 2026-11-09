@@ -183,7 +183,7 @@ Height: TikTok is vertical (e.g. 720x1440) - YouTube will pillarbox it.
 | Source | `STREAM_SOURCE`, `STREAMER_CHANNEL`, `STREAM_URL`, `STREAM_FLV` (`auto`/`true`/`false`), `HTTP_COOKIES_FILE` |
 | Sink | `UPLOAD_SERVICE` |
 | Streamlink | `STREAMLINK_QUALITY`, `QUALITY_FALLBACK`, `STREAMLINK_FLAGS`, `STREAMLINK_EXTRA_ARGS`, `STREAMLINK_LOGS`, `STREAMLINK_RETRY_STREAMS`, `STREAMLINK_RETRY_MAX`, `STREAMLINK_RETRY_OPEN`, `STREAMLINK_STREAM_TIMEOUT`, `STREAMLINK_HLS_LIVE_EDGE`, `STREAMLINK_BIN` |
-| Recording | `VIDEO_DURATION`, `SPLIT_INTO_PARTS`, `SPLIT_VIDEO_DURATION`, `RECONNECT_MAX`, `RECONNECT_DELAY`, `SAVE_ON_FAIL`, `TEMP_DIR`, `RECORD_FFMPEG_LOG` |
+| Recording | `VIDEO_DURATION`, `SPLIT_INTO_PARTS`, `SPLIT_VIDEO_DURATION`, `PART_LABELS`, `RECONNECT_MAX`, `RECONNECT_DELAY`, `SAVE_ON_FAIL`, `TEMP_DIR`, `RECORD_FFMPEG_LOG` |
 | Runtime | `POLL_INTERVAL`, `POLL_INTERVAL_MAX`, `POLL_BACKOFF`, `LOCK`, `STATE_DIR`, `LOG_LEVEL`, `LOG_FILE`, `LOG_MAX_MB`, `LOG_BACKUPS`, `DISCORD_WEBHOOK`, `NOTIFY_ON` |
 | Naming | `VIDEO_TITLE`, `VIDEO_DESCRIPTION`, `VIDEO_PLAYLIST`, `RCLONE_FILENAME`, `LOCAL_FILENAME`, `YOUTUBE_FILENAME`, `DATE_FORMAT`, `CLOCK_FORMAT` |
 | YouTube | `VIDEO_VISIBILITY`, `VIDEO_TAGS`, `VIDEO_CATEGORY_ID`, `VIDEO_LANGUAGE`, `VIDEO_MADE_FOR_KIDS`, `VIDEO_META_EXTRA_JSON`, `YOUTUBE_RECORD_TO_DISK`, `YOUTUBE_KEEP_LOCAL`, `YOUTUBE_MIN_BYTES`, `YOUTUBE_RATELIMIT`, `YOUTUBE_NOTIFY_SUBSCRIBERS`, `YOUTUBE_SECRETS`, `YOUTUBE_TOKEN_CACHE`, `YOUTUBE_UPLOADER_BIN`, `UPLOAD_RETRY_MAX` |
@@ -299,7 +299,8 @@ custom image with a headless Chromium (streamlink requirement).
    interrupted parts stay visible as `*.part`, `*.raw` or `*.failed.mkv`.
 5. **Repeat** — if the part ended because the duration limit was reached while
    the stream continued, the next part starts immediately; otherwise AutoVOD
-   goes back to polling. `SIGTERM`/`SIGINT` finishes the current part first.
+   goes back to polling. Set `PART_LABELS="false"` to drop the `Part: N` title
+   suffix and the `-Part_2` file suffix entirely. `SIGTERM`/`SIGINT` finishes the current part first.
 
 One instance per streamer is enforced with a lock file (`STATE_DIR/<name>.lock`).
 

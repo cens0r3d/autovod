@@ -808,6 +808,10 @@ def parse_probe_output(text):
 class Notifier:
     """Optional Discord webhook notifications (stdlib only, never fatal)."""
 
+    #: Anzeigetext je Event. Die Keys bleiben die Config-Werte aus NOTIFY_ON,
+    #: damit alte Configs ("end") weiter matchen - nur die Kopfzeile wird lesbar.
+    EVENT_LABELS = {"end": "Stream end!"}
+
     def __init__(self, url, events, streamer, log):
         self.url = url or ""
         self.events = set(events or [])
@@ -817,7 +821,7 @@ class Notifier:
     def send(self, event, message):
         if not self.url or event not in self.events:
             return
-        content = "**[%s] %s**\n%s" % (self.streamer, event, message)
+        content = "**[%s] %s**\n%s" % (self.streamer, self.EVENT_LABELS.get(event, event), message)
         payload = json.dumps({"username": "AutoVOD", "content": content[:1900]}).encode("utf-8")
         request = urllib.request.Request(
             self.url, data=payload, headers={"Content-Type": "application/json", "User-Agent": USER_AGENT}
@@ -1806,7 +1810,7 @@ class AutoVod:
                     self.state.set("last_message", result.message)
                     self.state.save()
                     self.log.info("part %d done: %s" % (part.index, result.message))
-                    self.notifier.send("end", "part %d done: %s" % (part.index, result.message))
+                    self.notifier.send("end", result.message)
                 else:
                     self.log.error("part %d failed: %s" % (part.index, result.message))
                     self.notifier.send("error", "part %d failed: %s" % (part.index, result.message))

@@ -12,7 +12,7 @@ remote, an RTMP(S) endpoint or your local disk.
 > splitting, an `eval` that executed stream titles, silent loss of a whole
 > recording when an upload died). All of them, the evidence and the upstream
 > issues they map to are documented in **[REVIEW.md](REVIEW.md)**. The old script
-> is preserved unchanged in [`legacy/AutoVOD-bash.sh`](legacy/AutoVOD-bash.sh).
+> lives on in the 2.x history of the upstream repository.
 
 Important: this does **not** download the official Twitch/Kick/YouTube VOD after
 the stream ends — it records the live stream with
@@ -41,19 +41,6 @@ Upload targets:
   `youtubeuploader` (YouTube uploads)
 
 ## Installation
-
-### Automatic
-
-```sh
-sh -c "$(curl -fsSL https://raw.githubusercontent.com/jenslys/autovod/master/install.sh)"
-```
-
-The installer is idempotent: it installs the system packages, creates a
-virtualenv with streamlink, optionally downloads rclone/youtubeuploader
-(architecture aware) and clones or updates the checkout. It never runs a
-distribution upgrade of your server.
-
-### Manual
 
 ```sh
 apt-get install -y python3 python3-venv ffmpeg git curl            # dnf: python3 python3-pip ffmpeg git curl

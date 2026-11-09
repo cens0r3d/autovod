@@ -14,16 +14,11 @@ jobs:
       - name: bash syntax
         run: |
           bash -n AutoVOD.sh
-          bash -n install.sh
           bash -n buildRunDocker.sh
-          bash -n legacy/AutoVOD-bash.sh
       - name: shellcheck
         run: |
           sudo apt-get update -qq && sudo apt-get install -y shellcheck
-          # AutoVOD.sh and buildRunDocker.sh must be clean; the 2.x script and
-          # install.sh are legacy/best-effort, so only report their findings.
           shellcheck -S warning AutoVOD.sh buildRunDocker.sh
-          shellcheck -S warning legacy/AutoVOD-bash.sh || true
 
   python:
     name: python ${{ matrix.os }}

@@ -14,11 +14,12 @@ jobs:
       - name: bash syntax
         run: |
           bash -n AutoVOD.sh
+          bash -n install.sh
           bash -n buildRunDocker.sh
       - name: shellcheck
         run: |
           sudo apt-get update -qq && sudo apt-get install -y shellcheck
-          shellcheck -S warning AutoVOD.sh buildRunDocker.sh
+          shellcheck -S warning AutoVOD.sh install.sh buildRunDocker.sh
 
   python:
     name: python ${{ matrix.os }}

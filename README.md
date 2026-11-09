@@ -42,6 +42,19 @@ Upload targets:
 
 ## Installation
 
+### Automatic
+
+```sh
+sh -c "$(curl -fsSL https://raw.githubusercontent.com/cens0r3d/autovod/master/install.sh)"
+```
+
+The installer is idempotent: it installs the system packages, creates a
+virtualenv with streamlink, optionally downloads rclone/youtubeuploader
+(architecture aware) and clones or updates the checkout. It never runs a
+distribution upgrade of your server.
+
+### Manual
+
 ```sh
 apt-get install -y python3 python3-venv ffmpeg git curl            # dnf: python3 python3-pip ffmpeg git curl
 python3 -m venv .venv && .venv/bin/pip install --upgrade streamlink # streamlink 8.x

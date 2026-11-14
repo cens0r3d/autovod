@@ -1615,6 +1615,7 @@ class Collector:
             self.log.info("collect: %s ist bereits hochgeladen - uebersprungen" % day)
             return 0
 
+        present.sort(key=lambda entry: entry.get("started") or "")
         total = sum(os.path.getsize(os.path.join(directory, e["file"])) for e in present)
         free = shutil.disk_usage(directory).free
         reserve = int(float(self.cfg.get("COLLECT_MIN_FREE_GB", 8)) * 1024 ** 3)

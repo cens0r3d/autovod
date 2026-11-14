@@ -1805,7 +1805,11 @@ class AutoVod:
     def _binary(self, cfg, key, default):
         """Binary/command override, relative paths resolved against the config dir."""
         cmd = list(cfg.get_list(key, default))
-        if cmd and ("/" in cmd[0] or os.sep in cmd[0]) and not os.path.isabs(cmd[0]):
+        # a leading "/" counts as absolute even on Windows (ntpath.isabs says
+        # False there, which would rewrite "/opt/venv/bin/streamlink" into
+        # "C:\\opt\\venv\\bin\\streamlink")
+        absolute = bool(cmd) and (cmd[0].startswith("/") or os.path.isabs(cmd[0]))
+        if cmd and ("/" in cmd[0] or os.sep in cmd[0]) and not absolute:
             # normpath keeps the path in native separators (".venv/bin/x" -> ".venv\\bin\\x"
             # on Windows) so argv/logs never carry mixed separators
             cmd[0] = os.path.normpath(cfg.path_in_config_dir(cmd[0]))

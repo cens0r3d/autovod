@@ -184,6 +184,7 @@ Height: TikTok is vertical (e.g. 720x1440) - YouTube will pillarbox it.
 | Sink | `UPLOAD_SERVICE` |
 | Streamlink | `STREAMLINK_QUALITY`, `QUALITY_FALLBACK`, `STREAMLINK_FLAGS`, `STREAMLINK_EXTRA_ARGS`, `STREAMLINK_LOGS`, `STREAMLINK_RETRY_STREAMS`, `STREAMLINK_RETRY_MAX`, `STREAMLINK_RETRY_OPEN`, `STREAMLINK_STREAM_TIMEOUT`, `STREAMLINK_HLS_LIVE_EDGE`, `STREAMLINK_BIN` |
 | Recording | `VIDEO_DURATION`, `SPLIT_INTO_PARTS`, `SPLIT_VIDEO_DURATION`, `PART_LABELS`, `RECONNECT_MAX`, `RECONNECT_DELAY`, `SAVE_ON_FAIL`, `TEMP_DIR`, `RECORD_FFMPEG_LOG` |
+| Collect | `COLLECT`, `COLLECT_DIR`, `COLLECT_SPLIT_HOURS`, `COLLECT_MIN_FREE_GB`, `COLLECT_TITLE`, `COLLECT_DESCRIPTION` |
 | Runtime | `POLL_INTERVAL`, `POLL_INTERVAL_MAX`, `POLL_BACKOFF`, `LOCK`, `STATE_DIR`, `LOG_LEVEL`, `LOG_FILE`, `LOG_MAX_MB`, `LOG_BACKUPS`, `DISCORD_WEBHOOK`, `NOTIFY_ON` |
 | Naming | `VIDEO_TITLE`, `VIDEO_DESCRIPTION`, `VIDEO_PLAYLIST`, `RCLONE_FILENAME`, `LOCAL_FILENAME`, `YOUTUBE_FILENAME`, `DATE_FORMAT`, `CLOCK_FORMAT` |
 | YouTube | `VIDEO_VISIBILITY`, `VIDEO_TAGS`, `VIDEO_CATEGORY_ID`, `VIDEO_LANGUAGE`, `VIDEO_MADE_FOR_KIDS`, `VIDEO_META_EXTRA_JSON`, `YOUTUBE_RECORD_TO_DISK`, `YOUTUBE_KEEP_LOCAL`, `YOUTUBE_MIN_BYTES`, `YOUTUBE_RATELIMIT`, `YOUTUBE_NOTIFY_SUBSCRIBERS`, `YOUTUBE_SECRETS`, `YOUTUBE_TOKEN_CACHE`, `YOUTUBE_UPLOADER_BIN`, `UPLOAD_RETRY_MAX` |
@@ -320,6 +321,35 @@ One instance per streamer is enforced with a lock file (`STATE_DIR/<name>.lock`)
 * New: `--check`, `--dry-run`, `--list-streams`, `--print-config`, log files
   with rotation, Discord notifications, per-streamer locking, graceful
   shutdown, configurable binary paths, `RECONNECT_*`/`UPLOAD_RETRY_*`.
+
+### Daily summary instead of one upload per part (`COLLECT`)
+
+For streamers who go live 5-10 times a day, every part is an upload - and that is
+what runs into YouTube's per-channel daily limit. With `COLLECT="true"` the recorder
+stops uploading: each finished part is moved to `pending/<YYYY-MM-DD>/` with a
+`manifest.json`. A cron job merges the parts of a **finished** day into one video
+and uploads that.
+
+```sh
+1 0 * * * cd ~/autovod && .venv/bin/python3 autovod.py -n <streamer> --collect
+```
+
+* a part that is still recording at 00:01 is not in the manifest yet - it is never
+  touched; it counts towards the day it **started**, and if that day's summary is
+  already uploaded it moves into the current day
+* mixed resolutions are levelled before merging (TikTok switches rendition between
+  two lives: 432x864 next to 320x640 is normal, and `-c copy` over mixed formats
+  produces broken output); only the odd parts are re-encoded
+* collections longer than `COLLECT_SPLIT_HOURS` (default 11 h) are split, so a day
+  never exceeds YouTube's 12 h cap
+* nothing is deleted before the upload is confirmed; a failed run leaves everything
+  in place and the next run retries
+* `COLLECT_MIN_FREE_GB` aborts instead of filling the disk - source and target both
+  exist during the merge
+
+Check what would happen without touching anything:
+`.venv/bin/python3 autovod.py -n <streamer> --collect --collect-dry-run`
+
 
 ## Troubleshooting
 

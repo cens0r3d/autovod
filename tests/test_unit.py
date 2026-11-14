@@ -478,5 +478,154 @@ class TikTokFlvTest(TempDirMixin, unittest.TestCase):
         self.assertFalse(any("--http-cookies-file" in flag for flag in flags))
 
 
+# ---------------------------------------------------------------------------
+# COLLECT: Tageszusammenfassung
+# ---------------------------------------------------------------------------
+
+HAVE_FFMPEG = bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
+
+
+def make_clip(directory, name, size, seconds):
+    """Kurzer Testclip mit Ton (echter ffmpeg-Lauf, kein Stub)."""
+    import subprocess
+    target = os.path.join(directory, name)
+    argv = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "testsrc=size=%s:rate=24" % size,
+            "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+            "-t", str(seconds), "-shortest", "-c:a", "aac",
+            "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+            "-f", "matroska", target]
+    subprocess.run(argv, check=True)
+    return target
+
+
+class CollectorTest(TempDirMixin, unittest.TestCase):
+    """Sammeln, Angleichen und Zusammenfuehren - mit echten Dateien."""
+
+    def make_collector_app(self, extra=""):
+        text = (
+            'STREAM_SOURCE="twitch"\n'
+            'UPLOAD_SERVICE="youtube"\n'
+            'VIDEO_TITLE="{{STREAMER}} LIVE"\n'
+            'VIDEO_PLAYLIST="$STREAMER_NAME VODs"\n'
+            'YOUTUBE_FILENAME="$STREAMER_NAME-TIME_DATE"\n'
+            'COLLECT="true"\n'
+            'COLLECT_DIR="pending"\n'
+            'COLLECT_MIN_FREE_GB="0"\n'
+            'TEMP_DIR="tmp"\n'
+            'STATE_DIR=".autovod"\n'
+        ) + extra
+        cfg = self.load_config(text)
+        app = autovod.AutoVod(cfg, autovod.Log("error"))
+        return app, app.collector
+
+    def make_part(self, index, when, base, title=None):
+        return autovod.Part(index, title or "Teil %d" % index, "", "", base,
+                            60, when, {}, labels=False)
+
+    def test_store_moves_part_into_day_folder(self):
+        app, collector = self.make_collector_app()
+        source = os.path.join(self.dir, "x.upload.mkv")
+        with open(source, "wb") as handle:
+            handle.write(b"data")
+        when = autovod.datetime(2026, 11, 1, 18, 5, 0)
+        result = collector.store(source, self.make_part(1, when, "tester-1"), "tester-1", seconds=60)
+        self.assertTrue(result.ok)
+        day = "2026-11-01"
+        self.assertFalse(os.path.exists(source))
+        files = [name for name in os.listdir(collector.day_dir(day)) if name.endswith(".mkv")]
+        self.assertEqual(len(files), 1)
+        manifest = collector.manifest(day)
+        self.assertEqual(len(manifest["parts"]), 1)
+        self.assertEqual(manifest["parts"][0]["seconds"], 60.0)
+        self.assertEqual(manifest["parts"][0]["title"], "Teil 1")
+
+    def test_store_rebuckets_part_when_day_is_already_uploaded(self):
+        """Ein Teil, der nach dem 00:01-Lauf fertig wird, zaehlt zum laufenden Tag."""
+        app, collector = self.make_collector_app()
+        yesterday = "2026-11-01"
+        collector.save_state(yesterday, {"status": "uploaded", "uploads": []})
+        source = os.path.join(self.dir, "late.upload.mkv")
+        with open(source, "wb") as handle:
+            handle.write(b"data")
+        collector.store(source, self.make_part(1, autovod.datetime(2026, 11, 1, 23, 55), "late"),
+                        "late", seconds=30)
+        today = collector.day_of(autovod.datetime.now())
+        entries_today = collector.manifest(today)["parts"]
+        self.assertEqual(len(entries_today), 1, "Teil muss beim laufenden Tag landen")
+        self.assertEqual(collector.manifest(yesterday)["parts"], [])
+
+    def test_pending_days_ignores_today(self):
+        app, collector = self.make_collector_app()
+        for day in ("2026-11-01", "2026-11-02", "2026-11-03"):
+            collector.save_manifest(day, {"parts": [{"file": "x.mkv", "seconds": 1}]})
+        pending = collector.pending_days(today="2026-11-03")
+        self.assertEqual(pending, ["2026-11-01", "2026-11-02"])
+
+    def test_chapters_are_skipped_for_short_parts(self):
+        app, collector = self.make_collector_app()
+        short = [{"title": "a", "seconds": 5}, {"title": "b", "seconds": 5}, {"title": "c", "seconds": 5}]
+        self.assertEqual(collector._chapters(short), [])
+        long_parts = [{"title": "a", "seconds": 60}, {"title": "b", "seconds": 90},
+                      {"title": "c", "seconds": 30}]
+        chapters = collector._chapters(long_parts)
+        self.assertEqual(chapters[0][:8], "00:00:00")
+        self.assertTrue(chapters[1].startswith("00:01:00"))
+        self.assertTrue(chapters[2].startswith("00:02:30"))
+
+    @unittest.skipUnless(HAVE_FFMPEG, "ffmpeg/ffprobe fehlen")
+    def test_collect_day_merges_mixed_resolutions_into_one_upload(self):
+        app, collector = self.make_collector_app()
+        day = "2026-11-01"
+        uploads = []
+
+        def fake_upload(path, base, part):
+            uploads.append((path, base, part.title, part.description))
+            os.remove(path)  # wie der echte Uploader nach Erfolg
+            return autovod.PartResult(True, "uploaded to youtube (https://youtu.be/STUB)",
+                                      artifact="https://youtu.be/STUB", uploaded=True)
+
+        app.sink.upload_file = fake_upload
+
+        plan = [("320x240", 3), ("160x120", 2), ("320x240", 4)]
+        for index, (size, seconds) in enumerate(plan, start=1):
+            clip = make_clip(self.dir, "part%d.mkv" % index, size, seconds)
+            when = autovod.datetime(2026, 11, 1, 18 + index, 0, 0)
+            collector.store(clip, self.make_part(index, when, "tester-%d" % index),
+                            "tester-%d" % index, seconds=seconds)
+
+        result = collector.collect_day(day)
+        self.assertEqual(result, 0)
+        self.assertEqual(len(uploads), 1, "genau ein Upload pro Tag")
+        path, base, title, description = uploads[0]
+        self.assertIn("Tageszusammenfassung", title)
+        self.assertIn("3 Streams", description)
+        state = collector.state(day)
+        self.assertEqual(state["status"], "uploaded")
+        self.assertEqual(state["parts"], 3)
+        self.assertAlmostEqual(state["seconds"], 9, delta=1)
+        # Quell-Teile und Zwischendateien sind weg, das Manifest bleibt
+        rest = sorted(os.listdir(collector.day_dir(day)))
+        self.assertNotIn("part1.mkv", " ".join(rest))
+        self.assertTrue(any(name.endswith(".json") for name in rest))
+
+    @unittest.skipUnless(HAVE_FFMPEG, "ffmpeg/ffprobe fehlen")
+    def test_collect_day_is_idempotent(self):
+        app, collector = self.make_collector_app()
+        day = "2026-11-01"
+        calls = []
+        app.sink.upload_file = lambda path, base, part: (
+            calls.append(base), os.remove(path),
+            autovod.PartResult(True, "uploaded", artifact="x", uploaded=True))[-1]
+        clip = make_clip(self.dir, "only.mkv", "160x120", 2)
+        collector.store(clip, self.make_part(1, autovod.datetime(2026, 11, 1, 20, 0), "only"),
+                        "only", seconds=2)
+        self.assertEqual(collector.collect_day(day), 0)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(collector.collect_day(day), 0)
+        self.assertEqual(len(calls), 1, "zweiter Lauf darf nicht erneut hochladen")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+

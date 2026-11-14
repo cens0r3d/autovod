@@ -1152,6 +1152,21 @@ class YoutubeSink(Sink):
                              % (human_bytes(size), minimum))
         self.log.info("recorded %s (%s), starting upload" % (cache_path, human_bytes(size)))
 
+        collector = getattr(self.app, "collector", None)
+        if collector is not None and collector.enabled:
+            # COLLECT: kein Upload jetzt - der Teil geht in den Tagesordner und
+            # wird um 00:01 mit den anderen Lives des Tages zusammengefuehrt
+            return collector.store(cache_path, part, base, seconds=seconds)
+
+        return self._upload_file(cache_path, base, part, seconds=seconds)
+
+    def upload_file(self, path, base, part):
+        """Upload an already finished file (used by the daily collector)."""
+        return self._upload_file(path, base, part, seconds=float(part.duration or 0))
+
+    def _upload_file(self, cache_path, base, part, seconds=0.0):
+        """Upload one finished file and return the PartResult (retries included)."""
+        workdir = self.app.work_dir()
         attempts = max(1, self.cfg.get_int("UPLOAD_RETRY_MAX", 3))
         for attempt in range(1, attempts + 1):
             self.log.info("uploading to youtube (attempt %d/%d)" % (attempt, attempts))
@@ -1260,6 +1275,458 @@ SINKS = {
 }
 
 
+# ---------------------------------------------------------------------------
+# daily collection (COLLECT="true")
+# ---------------------------------------------------------------------------
+
+class Collector:
+    """Sammelt die Teile eines Tages und laedt sie als ein Video hoch.
+
+    Streamer, die 5-10 Mal am Tag live gehen, erzeugen sonst genau so viele
+    Uploads - und laufen ins Tageslimit des Kanals. Mit ``COLLECT="true"``
+    laedt der Recorder nichts mehr selbst hoch, sondern legt jeden fertigen
+    Teil unter ``pending/<datum>/`` ab (mit ``manifest.json``). Ein Cron-Lauf
+    (Vorgabe 00:01) fuehrt die Teile eines **abgeschlossenen** Tages zu einem
+    Video zusammen und laedt das hoch.
+
+    Ein Teil, der waehrend des Cron-Laufs noch aufgenommen wird, ist schlicht
+    noch nicht im Manifest - er wird nicht angefasst. Gezaehlt wird er zu dem
+    Tag, an dem er **gestartet** ist; ist dessen Zusammenfassung schon
+    hochgeladen, wandert er in den laufenden Tag.
+
+    Aufloesungen werden vor dem Zusammenfuehren angeglichen: TikTok wechselt
+    die Rendition zwischen zwei Lives (432x864 neben 320x640 ist normal), und
+    ``-c copy`` ueber gemischte Formate liefert Matsch.
+    """
+
+    DAY_FORMAT = "%Y-%m-%d"
+
+    def __init__(self, cfg, log, app=None):
+        self.cfg = cfg
+        self.log = log
+        self.app = app
+        self.enabled = cfg.get_bool("COLLECT", False)
+        self.root = cfg.path_in_config_dir(str(cfg.get("COLLECT_DIR", "pending") or "pending"))
+
+    # -- paths / state ------------------------------------------------------
+    def day_of(self, moment):
+        return moment.strftime(self.DAY_FORMAT)
+
+    def day_dir(self, day):
+        return os.path.join(self.root, day)
+
+    def manifest_path(self, day):
+        return os.path.join(self.day_dir(day), "manifest.json")
+
+    def state_path(self, day):
+        return os.path.join(self.day_dir(day), "state.json")
+
+    @staticmethod
+    def _read_json(path, default):
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+            return data if isinstance(data, (dict, list)) else default
+        except (OSError, ValueError):
+            return default
+
+    @staticmethod
+    def _write_json(path, data):
+        temp = path + ".tmp"
+        with open(temp, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=2, ensure_ascii=False)
+        os.replace(temp, path)
+
+    def manifest(self, day):
+        data = self._read_json(self.manifest_path(day), {"parts": []})
+        if isinstance(data, list):  # tolerate a bare list
+            return {"parts": data}
+        data.setdefault("parts", [])
+        return data
+
+    def save_manifest(self, day, data):
+        os.makedirs(self.day_dir(day), exist_ok=True)
+        self._write_json(self.manifest_path(day), data)
+
+    def state(self, day):
+        data = self._read_json(self.state_path(day), {})
+        return data if isinstance(data, dict) else {}
+
+    def save_state(self, day, data):
+        os.makedirs(self.day_dir(day), exist_ok=True)
+        data["updated"] = datetime.now().isoformat(timespec="seconds")
+        self._write_json(self.state_path(day), data)
+
+    # -- recorder side ------------------------------------------------------
+    def store(self, path, part, base, seconds=0.0):
+        """Nimm einen fertigen Teil in den Tagesordner auf (kein Upload hier)."""
+        day = self.day_of(part.now)
+        if self.state(day).get("status") == "uploaded":
+            today = self.day_of(datetime.now())
+            if today != day:
+                self.log.info("collect: %s ist schon hochgeladen - der Teil zaehlt zum %s" % (day, today))
+                day = today
+            else:
+                self.log.info("collect: Zusammenfassung fuer %s ist raus - neuer Teil wird Nachtrag" % day)
+                state = self.state(day)
+                state["status"] = "partial"
+                self.save_state(day, state)
+
+        directory = self.day_dir(day)
+        os.makedirs(directory, exist_ok=True)
+        stamp = part.now.strftime("%H%M%S")
+        name = good_filename("%s-%s.mkv" % (stamp, base))
+        target = os.path.join(directory, name)
+        index = 1
+        while os.path.exists(target):
+            index += 1
+            target = os.path.join(directory, good_filename("%s-%s-%d.mkv" % (stamp, base, index)))
+        shutil.move(path, target)
+
+        data = self.manifest(day)
+        data["parts"].append({
+            "file": os.path.basename(target),
+            "base": base,
+            "title": part.title,
+            "started": part.now.isoformat(timespec="seconds"),
+            "seconds": round(float(seconds or 0), 3),
+            "size": os.path.getsize(target),
+        })
+        self.save_manifest(day, data)
+        self.log.info("collect: %s -> %s (%s Teile, gesamt %s)"
+                      % (os.path.basename(target), day, len(data["parts"]),
+                         human_bytes(sum(int(p.get("size") or 0) for p in data["parts"]))))
+        return PartResult(True, "collected for daily summary %s (upload after midnight)" % day,
+                          artifact=target, seconds=seconds)
+
+    # -- media helpers ------------------------------------------------------
+    def ffprobe_cmd(self):
+        ffmpeg = list(getattr(self.app, "ffmpeg_cmd", ["ffmpeg"])) or ["ffmpeg"]
+        directory = os.path.dirname(ffmpeg[0])
+        candidate = os.path.join(directory, "ffprobe") if directory else "ffprobe"
+        if which(candidate):
+            return [candidate]
+        return ["ffprobe"]
+
+    def probe(self, path):
+        argv = self.ffprobe_cmd() + ["-v", "error", "-print_format", "json",
+                                     "-show_format", "-show_streams", path]
+        try:
+            result = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if result.returncode != 0:
+            return None
+        try:
+            data = json.loads(result.stdout or "{}")
+        except ValueError:
+            return None
+        video = next((s for s in data.get("streams", []) if s.get("codec_type") == "video"), None)
+        audio = next((s for s in data.get("streams", []) if s.get("codec_type") == "audio"), None)
+        if not video:
+            return None
+        try:
+            duration = float((data.get("format") or {}).get("duration") or 0)
+        except (TypeError, ValueError):
+            duration = 0.0
+        return {
+            "codec": video.get("codec_name"),
+            "width": int(video.get("width") or 0),
+            "height": int(video.get("height") or 0),
+            "fps": str(video.get("r_frame_rate") or "0/1"),
+            "audio": bool(audio),
+            "duration": duration,
+        }
+
+    @staticmethod
+    def _same_format(info, target):
+        return (info["codec"] == target["codec"] and info["width"] == target["width"]
+                and info["height"] == target["height"] and info["fps"] == target["fps"])
+
+    @staticmethod
+    def _target_format(infos):
+        """Das Format, das die meiste Sendezeit hat, gewinnt (Aufloesung + fps)."""
+        weights = {}
+        for info in infos:
+            key = (info["codec"], info["width"], info["height"], info["fps"])
+            entry = weights.setdefault(key, {"seconds": 0.0, "info": info})
+            entry["seconds"] += info["duration"]
+        best = max(weights.values(), key=lambda item: item["seconds"])
+        return best["info"]
+
+    def normalize(self, source, target_path, fmt, has_audio):
+        scale = ("scale=%d:%d:force_original_aspect_ratio=decrease,"
+                 "pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black"
+                 % (fmt["width"], fmt["height"], fmt["width"], fmt["height"]))
+        argv = self.app.ffmpeg_cmd + ["-hide_banner", "-loglevel", "error", "-y",
+                                      "-i", source,
+                                      "-vf", scale, "-r", fmt["fps"],
+                                      "-c:v", "libx264", "-preset", "veryfast", "-crf", "20"]
+        if has_audio:
+            argv += ["-c:a", "aac", "-ar", "48000", "-ac", "2"]
+        else:
+            argv += ["-an"]
+        argv += ["-fflags", "+genpts", "-avoid_negative_ts", "make_zero",
+                 "-f", "matroska", target_path]
+        self.log.info("collect: normalize %s -> %dx%d %s"
+                      % (os.path.basename(source), fmt["width"], fmt["height"], fmt["fps"]))
+        code = self.app.run_streamed(argv, "ffmpeg")
+        if code != 0:
+            self.log.error("collect: normalize failed (ffmpeg exit %s): %s" % (code, source))
+            return False
+        return True
+
+    def concat(self, paths, target_path):
+        directory = os.path.dirname(target_path) or "."
+        os.makedirs(directory, exist_ok=True)
+        list_path = os.path.join(directory, "concat.txt")
+        with open(list_path, "w", encoding="utf-8") as handle:
+            for path in paths:
+                handle.write("file '%s'\n" % os.path.abspath(path).replace("'", "'\\''"))
+        argv = self.app.ffmpeg_cmd + ["-hide_banner", "-loglevel", "error", "-y",
+                                      "-f", "concat", "-safe", "0", "-i", list_path,
+                                      "-c", "copy", "-fflags", "+genpts",
+                                      "-avoid_negative_ts", "make_zero",
+                                      "-f", "matroska", target_path]
+        code = self.app.run_streamed(argv, "ffmpeg")
+        if code != 0 or not os.path.exists(target_path) or os.path.getsize(target_path) == 0:
+            self.log.error("collect: merge failed (ffmpeg exit %s)" % code)
+            return False
+        try:
+            os.remove(list_path)
+        except OSError:
+            pass
+        return True
+
+    def split_chunks(self, path, limit_seconds):
+        """Schneide eine zu lange Sammlung in YouTube-taugliche Stuecke."""
+        info = self.probe(path)
+        duration = info["duration"] if info else 0.0
+        if not duration or duration <= limit_seconds:
+            return [path]
+        chunks = []
+        start = 0.0
+        index = 1
+        while start < duration:
+            target = "%s-%d.mkv" % (os.path.splitext(path)[0], index)
+            length = min(float(limit_seconds), duration - start)
+            argv = self.app.ffmpeg_cmd + ["-hide_banner", "-loglevel", "error", "-y",
+                                          "-ss", "%.3f" % start, "-i", path,
+                                          "-t", "%.3f" % length, "-c", "copy",
+                                          "-f", "matroska", target]
+            if self.app.run_streamed(argv, "ffmpeg") != 0:
+                self.log.error("collect: split failed at %.0fs" % start)
+                return [path]
+            chunks.append(target)
+            start += length
+            index += 1
+        os.remove(path)
+        return chunks
+
+    # -- meta ---------------------------------------------------------------
+    def _render_tokens(self, day, stream_count, duration, chunk_index, chunk_count):
+        base_url = getattr(self.app, "stream_url", "") if self.app else ""
+        tokens = {
+            "{{STREAMER}}": self.cfg.streamer,
+            "{{DATE}}": day,
+            "{{STREAMS}}": str(stream_count),
+            "{{DURATION}}": format_duration(int(duration)),
+            "{{URL}}": base_url,
+        }
+        if chunk_count > 1:
+            tokens["{{PART}}"] = "%d/%d" % (chunk_index, chunk_count)
+        return tokens
+
+    def _chapters(self, entries):
+        """Kapitelmarken aus den Teillaengen - nur wenn YouTube sie akzeptiert."""
+        if len(entries) < 3:
+            return []
+        lines = []
+        offset = 0.0
+        for entry in entries:
+            seconds = float(entry.get("seconds") or 0)
+            if seconds and seconds < 10:
+                return []
+            title = (entry.get("title") or entry.get("file") or "").strip() or entry.get("file", "")
+            minutes, rest = divmod(int(offset), 60)
+            hours, minutes = divmod(minutes, 60)
+            lines.append("%02d:%02d:%02d %s" % (hours, minutes, rest, title[:80]))
+            offset += seconds
+        return lines
+
+    def build_meta(self, day, entries, duration, chunk_index=1, chunk_count=1):
+        tokens = self._render_tokens(day, len(entries), duration, chunk_index, chunk_count)
+        title_template = str(self.cfg.get(
+            "COLLECT_TITLE", "{{STREAMER}} | {{DATE}} | Tageszusammenfassung"))
+        title = title_template
+        for token, value in tokens.items():
+            title = title.replace(token, value)
+        if chunk_count > 1 and "{{PART}}" not in title_template:
+            title = "%s (%d/%d)" % (title, chunk_index, chunk_count)
+        title = clamp_youtube_title(title)
+
+        description_template = str(self.cfg.get(
+            "COLLECT_DESCRIPTION",
+            "Tageszusammenfassung: {{STREAMS}} Streams, {{DURATION}} gesamt\nQuelle: {{URL}}"))
+        description = description_template
+        for token, value in tokens.items():
+            description = description.replace(token, value)
+        description = description.replace("\\n", "\n")
+        chapters = self._chapters(entries)
+        if chapters:
+            description = description.rstrip() + "\n\nKapitel:\n" + "\n".join(chapters)
+
+        playlist = str(self.cfg.get("VIDEO_PLAYLIST", "") or "")
+        if self.app is not None and playlist:
+            playlist = self.app.render(playlist)
+        suffix = "" if chunk_count == 1 else "-%d" % chunk_index
+        base = good_filename("%s-%s-tageszusammenfassung%s"
+                            % (self.cfg.streamer, day, suffix))
+        return title, description, playlist, base
+
+    # -- cron side ----------------------------------------------------------
+    def pending_days(self, today=None):
+        """Alle Tage mit offenen Teilen, die abgeschlossen sind (also vor heute)."""
+        today = today or self.day_of(datetime.now())
+        days = []
+        if not os.path.isdir(self.root):
+            return days
+        for name in sorted(os.listdir(self.root)):
+            if not re.match(r"^\d{4}-\d{2}-\d{2}$", name):
+                continue
+            if name >= today:  # laufender Tag wird nie gemergt
+                continue
+            if os.path.isfile(self.manifest_path(name)):
+                days.append(name)
+        return days
+
+    def collect_day(self, day, dry_run=False):
+        if self.app is None:
+            self.log.error("collect: no recorder instance - cannot merge")
+            return 1
+        entries = self.manifest(day)["parts"]
+        directory = self.day_dir(day)
+        present = [entry for entry in entries
+                   if os.path.isfile(os.path.join(directory, entry.get("file", "")))]
+        if not present:
+            self.log.info("collect: %s hat keine Teile mehr - nichts zu tun" % day)
+            return 0
+        if self.state(day).get("status") == "uploaded":
+            self.log.info("collect: %s ist bereits hochgeladen - uebersprungen" % day)
+            return 0
+
+        total = sum(os.path.getsize(os.path.join(directory, e["file"])) for e in present)
+        free = shutil.disk_usage(directory).free
+        reserve = int(float(self.cfg.get("COLLECT_MIN_FREE_GB", 8)) * 1024 ** 3)
+        if free < total + reserve:
+            self.log.error("collect: %s zu wenig Platz (%s frei, %s Teile + %s Reserve noetig) - "
+                           "%s bleibt liegen"
+                           % (day, human_bytes(free), human_bytes(total), human_bytes(reserve), day))
+            return 1
+
+        infos = []
+        for entry in present:
+            info = self.probe(os.path.join(directory, entry["file"]))
+            if info is None:
+                self.log.warning("collect: %s nicht lesbar - wird ausgelassen" % entry["file"])
+                continue
+            infos.append((entry, info))
+        if not infos:
+            self.log.error("collect: kein lesbarer Teil fuer %s" % day)
+            return 1
+
+        target = self._target_format([info for _, info in infos])
+        prepared = []
+        for entry, info in infos:
+            source = os.path.join(directory, entry["file"])
+            if self._same_format(info, target):
+                prepared.append(source)
+                continue
+            converted = os.path.splitext(source)[0] + ".norm.mkv"
+            if dry_run:
+                self.log.info("[dry-run] would normalize %s" % entry["file"])
+                prepared.append(source)
+            elif self.normalize(source, converted, target, info["audio"]):
+                prepared.append(converted)
+            else:
+                self.log.warning("collect: %s nicht angeglichen - wird ausgelassen" % entry["file"])
+
+        if not prepared:
+            self.log.error("collect: nichts zusammenfuehrbar fuer %s" % day)
+            return 1
+
+        merged = os.path.join(directory, "summary-%s.mkv" % day)
+        if dry_run:
+            self.log.info("[dry-run] would merge %d parts -> %s" % (len(prepared), merged))
+            return 0
+        if not self.concat(prepared, merged):
+            return 1
+
+        limit = int(float(self.cfg.get("COLLECT_SPLIT_HOURS", 11)) * 3600)
+        chunks = self.split_chunks(merged, limit)
+        merged_info = self.probe(chunks[0]) or {"duration": 0.0}
+        total_seconds = sum(float(info["duration"]) for _, info in infos)
+
+        uploads = []
+        for index, chunk in enumerate(chunks, 1):
+            duration = (self.probe(chunk) or merged_info).get("duration") or merged_info["duration"]
+            title, description, playlist, base = self.build_meta(
+                day, [entry for entry, _ in infos], duration, index, len(chunks))
+            part = Part(1, title, description, playlist, base, duration, datetime.now(), {}, labels=False)
+            part.title, part.description, part.playlist = title, description, playlist
+            self.log.info("collect: uploading %s (%s, %d Teile)"
+                          % (os.path.basename(chunk), human_bytes(os.path.getsize(chunk)),
+                             len(present)))
+            result = self.app.sink.upload_file(chunk, base, part) if hasattr(self.app.sink, "upload_file") \
+                else PartResult(False, "sink does not support collected uploads")
+            if not result.ok:
+                self.log.error("collect: upload failed for %s: %s" % (day, result.message))
+                state = self.state(day)
+                state["status"] = "partial"
+                state["last_error"] = result.message
+                self.save_state(day, state)
+                return 1
+            uploads.append({"file": os.path.basename(chunk), "video": result.artifact,
+                            "title": title, "seconds": round(float(duration or 0), 3)})
+
+        for source in prepared:
+            if os.path.exists(source):
+                os.remove(source)
+        for entry in present:
+            path = os.path.join(directory, entry["file"])
+            if os.path.exists(path):
+                os.remove(path)
+        self.save_state(day, {"status": "uploaded", "uploads": uploads,
+                              "parts": len(present), "seconds": round(total_seconds, 3)})
+        self.log.info("collect: %s fertig - %d Upload(s), %s gesamt"
+                      % (day, len(uploads), format_duration(int(total_seconds))))
+        return 0
+
+    def preflight(self):
+        problems = []
+        if not self.enabled:
+            return problems
+        if getattr(self.app, "sink_name", "youtube") != "youtube":
+            problems.append("COLLECT=true needs UPLOAD_SERVICE=youtube")
+        if not which(self.ffprobe_cmd()[0]):
+            problems.append("%s is not installed / not in PATH" % self.ffprobe_cmd()[0])
+        return problems
+
+    def run(self, only_day=None, dry_run=False):
+        if not self.enabled:
+            self.log.warning("collect is not enabled for %s (COLLECT=\"true\")" % self.cfg.streamer)
+            return 1
+        days = [only_day] if only_day else self.pending_days()
+        if not days:
+            self.log.info("collect: nichts zu tun")
+            return 0
+        result = 0
+        for day in days:
+            self.log.info("collect: bearbeite %s" % day)
+            result = max(result, self.collect_day(day, dry_run=dry_run))
+        return result
+
+
 # ----------------------------------------------------------------------------
 # application
 # ----------------------------------------------------------------------------
@@ -1293,6 +1760,7 @@ class AutoVod:
             raise ConfigError("invalid UPLOAD_SERVICE %r (valid: %s)"
                               % (self.sink_name, ", ".join(sorted(SINKS))))
         self.sink = sink_class(self)
+        self.collector = Collector(cfg, log, self)
         self.stream_url = self._build_stream_url()
         self.flv_mode = self._detect_flv_mode()
         self.duration = self._part_duration()
@@ -1555,6 +2023,7 @@ class AutoVod:
         for warning in self.cfg.warnings:
             self.log.warning("config: %s" % warning)
         problems.extend(self.sink.preflight())
+        problems.extend(self.collector.preflight())
         return problems
 
     def streamlink_version(self):
@@ -1912,6 +2381,12 @@ def build_parser():
                         help="report live state, metadata and available qualities")
     parser.add_argument("--print-config", action="store_true", help="print the parsed config and exit")
     parser.add_argument("--force", action="store_true", help="overwrite existing files")
+    parser.add_argument("--collect", action="store_true",
+                        help="merge the parts of finished days and upload the daily summary (COLLECT=true)")
+    parser.add_argument("--collect-date", metavar="YYYY-MM-DD",
+                        help="with --collect: only that day")
+    parser.add_argument("--collect-dry-run", action="store_true",
+                        help="with --collect: show what would be merged, change nothing")
     parser.add_argument("-q", "--quiet", action="store_true", help="only warnings and errors")
     parser.add_argument("-v", "--verbose", action="store_true", help="debug logging")
     parser.add_argument("--version", action="version", version="AutoVOD %s" % VERSION)
@@ -1971,6 +2446,9 @@ def main(argv=None):
             return 2
         LOG.info("all checks passed: %s (%s -> %s)" % (app.streamer, app.stream_url, app.sink_name))
         return 0
+
+    if args.collect:
+        return app.collector.run(only_day=args.collect_date, dry_run=args.collect_dry_run)
 
     def handle_signal(signum, _frame):
         app.request_stop()

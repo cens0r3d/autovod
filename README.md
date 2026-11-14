@@ -36,6 +36,7 @@ Upload targets:
 
 * Linux server (also runs on macOS/Windows; production target is Linux)
 * Python **3.8+** — the tool itself is one stdlib-only file, no `jq`, no bash logic
+  (CI runs 3.9 and 3.13: the GitHub runner images no longer ship 3.8)
 * [streamlink](https://streamlink.github.io/) **6.0+** (8.x recommended)
 * optional: `ffmpeg` (re-encode / restream), `rclone` (rclone uploads),
   `youtubeuploader` (YouTube uploads)
